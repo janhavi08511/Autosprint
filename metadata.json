@@ -1,0 +1,6 @@
+
+{
+  "name": "Agentic Execution Intelligence Platform (AEIP)",
+  "description": "An autonomous workflow monitoring and execution system that uses SLM-first reasoning and RAG to handle task escalations and reminders without human intervention.",
+  "requestFramePermissions": []
+}
