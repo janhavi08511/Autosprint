@@ -1,8 +1,9 @@
 
 import { Task, TaskStatus, ActionType, DecisionLog, User } from './types';
-import { computeDecision } from './reasoningEngine';
+import { computeDecision, isActionUpgrade } from './reasoningEngine';
 import { retrieveMemories, addMemory } from './vectorStore';
 import { generateDecisionExplanation } from './geminiService';
+import { taskAPI } from './api/client';
 
 export interface AgentUpdate {
   updatedTasks: Task[];
@@ -24,59 +25,84 @@ export const runMonitoringCycle = async (
 
   for (let i = 0; i < nextTasks.length; i++) {
     const task = nextTasks[i];
-
-    // Only monitor active tasks
     if ([TaskStatus.COMPLETED, TaskStatus.SUBMITTED].includes(task.status)) continue;
 
     const user = users.find(u => u.id === task.assigneeId);
     if (!user) continue;
 
-    // 1. COMPUTE (SLM-first)
-    const { riskScore, action, escalationPath } = computeDecision(task, user, now);
+    try {
+      const { riskScore, action, escalationPath } = computeDecision(task, user, now);
+      const previousAction = task.lastAction ?? ActionType.NONE;
+      const actionChanged = isActionUpgrade(action, previousAction);
+      const persistedAction = actionChanged ? action : previousAction;
+      const stateChanged = riskScore !== task.riskScore || persistedAction !== task.lastAction;
+      if (!stateChanged) continue;
 
-    // 2. If action needed and different from last state (prevent spam)
-    if (action !== ActionType.NONE && (action !== task.lastAction || riskScore !== task.riskScore)) {
+      const retrieval = actionChanged
+        ? await retrieveMemories(user.id, task.deptId, task.title)
+        : { memories: [], source: 'NONE' as const };
+      const explanation = actionChanged
+        ? await generateDecisionExplanation(
+            task,
+            action,
+            retrieval.memories.map(memory => memory.text),
+            user,
+            riskScore
+          )
+        : null;
 
-      // 3. RETRIEVE (RAG) - Now Async
-      const memories = await retrieveMemories(user.id, task.deptId, task.title);
-
-      // 4. EXPLAIN (LLM - only for significant actions)
-      const explanation = await generateDecisionExplanation(task, action, memories, user, riskScore);
-
-      // 5. UPDATE
-      const updatedTask: Task = {
-        ...task,
-        riskScore,
-        lastAction: action,
-        status: riskScore > 60 ? TaskStatus.AT_RISK : (task.deadline < now ? TaskStatus.OVERDUE : task.status),
-        updatedAt: now
-      };
-
-      nextTasks[i] = updatedTask;
-
-      const log: DecisionLog = {
-        id: `LOG-${Math.random().toString(36).substr(2, 9)}`,
-        taskId: task.id,
-        timestamp: now,
-        action,
-        riskScore,
-        retrievedMemories: memories,
-        explanation,
-        escalationPath
-      };
-
-      onLog(log);
-
-      // 6. LEARNING LOOP (Self-Improvement)
-      // If we just Escalated, let's record that this user/task needed help.
-      if (action === ActionType.ESCALATE || action === ActionType.CRITICAL_ESCALATE) {
-        const memoryText = `System needed to ${action} task "${task.title}" for User ${user.name} (Risk: ${riskScore}%)`;
-        addMemory(memoryText, {
-          userId: user.id,
-          deptId: user.deptId,
-          taskType: "Escalation"
+      if (actionChanged) {
+        const decisionId = `DEC-${crypto.randomUUID()}`;
+        const result = await taskAPI.recordDecision(task.id, {
+          decisionId,
+          action,
+          riskScore,
+          retrievedMemories: retrieval.memories,
+          retrievalSource: retrieval.source,
+          explanation: explanation?.text ?? '',
+          explanationSource: explanation?.source ?? 'UNAVAILABLE',
+          escalationPath,
         });
+        if (result.task) nextTasks[i] = result.task;
+        if (!result.created || !result.trace) continue;
+
+        let log: DecisionLog = result.trace;
+        onLog(log);
+
+        if (action === ActionType.ESCALATE || action === ActionType.CRITICAL_ESCALATE) {
+          const memoryId = `MEM-${decisionId}`;
+          const memory = await addMemory(
+            `Task "${task.title}" (${task.priority}) required ${action} at risk ${riskScore}/100. ` +
+              `Task description: ${task.description}. ` +
+              `Historical context: ${retrieval.memories.map(item => item.text).join(' ')}`,
+            {
+              user_id: user.id,
+              dept_id: user.deptId,
+              task_type: "Escalation",
+              decision_id: decisionId,
+            },
+            memoryId
+          );
+          await taskAPI.updateExecutionMemory(decisionId, memory.id, memory.stored);
+          log = {
+            ...log,
+            execution: {
+              status: memory.stored ? 'MEMORY_STORED' : 'MEMORY_UNAVAILABLE',
+              memoryId: memory.id,
+              memoryStored: memory.stored,
+            },
+          };
+          onLog(log);
+        }
+      } else {
+        const updatedTask = await taskAPI.updateAgentState(task.id, {
+          riskScore,
+          lastAction: persistedAction,
+        });
+        nextTasks[i] = updatedTask;
       }
+    } catch (error) {
+      console.error(`Monitoring failed for task ${task.id}:`, error);
     }
   }
 

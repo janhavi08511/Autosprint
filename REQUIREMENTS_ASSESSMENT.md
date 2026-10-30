@@ -122,8 +122,8 @@ The implementation demonstrates strong alignment with the requirements, with all
 - **File**: `geminiService.ts:6`
 - **Issue**: Gemini API key is hardcoded in source code
 - **Fix Needed**: Use environment variable `import.meta.env.VITE_GEMINI_API_KEY`
-- **Current**: `apiKey: 'AIzaSyC3ThbiDA5K61syr-HAzcbjSAh6ps0riYI'`
-- **Should be**: `apiKey: import.meta.env.VITE_GEMINI_API_KEY`
+- **Current**: The browser no longer calls Gemini directly.
+- **Should be**: Configure `GEMINI_API_KEY` in the backend environment and use the authenticated explanation API.
 
 #### 3. Missing `.env.local` File
 - **Issue**: README mentions `.env.local` but file doesn't exist

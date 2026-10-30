@@ -1,6 +1,17 @@
 
 import { Task, TaskStatus, ActionType, User } from './types';
 
+const ACTION_SEVERITY: Record<ActionType, number> = {
+  [ActionType.NONE]: 0,
+  [ActionType.REMIND]: 1,
+  [ActionType.RISK_ALERT]: 2,
+  [ActionType.ESCALATE]: 3,
+  [ActionType.CRITICAL_ESCALATE]: 4,
+};
+
+export const isActionUpgrade = (action: ActionType, previousAction: ActionType): boolean =>
+  ACTION_SEVERITY[action] > ACTION_SEVERITY[previousAction];
+
 /**
  * Cost-optimized reasoning. 
  * First, calculate risk score and action deterministically.

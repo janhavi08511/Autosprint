@@ -1,160 +1,168 @@
-from fastapi import APIRouter, HTTPException, status
-from typing import List
 from datetime import datetime
-from models import Project, ProjectCreate, ProjectUpdate, MessageResponse
+from typing import List
+
+from fastapi import APIRouter, Depends, HTTPException, status
+
+from auth import get_current_user
 from database import get_database
+from models import MessageResponse, Project, ProjectCreate, ProjectUpdate
 
 router = APIRouter(prefix="/api/projects", tags=["projects"])
 
-@router.get("/", response_model=List[Project])
-async def get_all_projects(user_id: str = None):
-    """Get all projects, filtered by user access (Lead, Member, or Assigned Task)"""
-    db = get_database()
-    
-    if not user_id:
-        # Return empty if no user specified (secure by default)
-        return []
 
-    # 1. Direct Access (Lead or Member)
-    # Find IDs of projects where user is lead or member
-    direct_projects = await db.projects.find({
-        "$or": [
-            {"leadId": user_id},
-            {"memberIds": user_id}
-        ]
-    }, {"id": 1}).to_list(1000)
-    
-    project_ids = {p["id"] for p in direct_projects}
+def is_admin(user: dict) -> bool:
+    return user.get("role") == "ADMIN"
 
-    # 2. Task Access (Assigned to a task in the project)
-    # Find all tasks assigned to this user that belong to a project
-    user_tasks = await db.tasks.find({
-        "assigneeId": user_id, 
-        "projectId": {"$ne": None}
-    }, {"projectId": 1}).to_list(1000)
-    
-    for task in user_tasks:
-        if task.get("projectId"):
-            project_ids.add(task["projectId"])
 
-    # 3. Fetch unique projects
+def is_project_lead(project: dict, user: dict) -> bool:
+    return is_admin(user) or project.get("leadId") == user["id"]
+
+
+async def load_accessible_projects(db, user: dict) -> list[dict]:
+    if is_admin(user):
+        return await db.projects.find().to_list(1000)
+    project_ids = {
+        project["id"]
+        for project in await db.projects.find(
+            {"$or": [{"leadId": user["id"]}, {"memberIds": user["id"]}]},
+            {"id": 1},
+        ).to_list(1000)
+    }
+    assigned = await db.tasks.find(
+        {"assigneeId": user["id"], "projectId": {"$ne": None}},
+        {"projectId": 1},
+    ).to_list(1000)
+    project_ids.update(
+        task["projectId"] for task in assigned if task.get("projectId")
+    )
     if not project_ids:
         return []
-        
-    all_projects = await db.projects.find({"id": {"$in": list(project_ids)}}).to_list(1000)
-    return all_projects
+    return await db.projects.find({"id": {"$in": list(project_ids)}}).to_list(1000)
 
-@router.get("/{project_id}", response_model=Project)
-async def get_project(project_id: str):
-    """Get project by ID"""
-    db = get_database()
+
+async def require_project_access(db, project_id: str, user: dict) -> dict:
     project = await db.projects.find_one({"id": project_id})
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
-    return project
+    if is_admin(user) or project.get("leadId") == user["id"]:
+        return project
+    if user["id"] in project.get("memberIds", []):
+        return project
+    task = await db.tasks.find_one({"projectId": project_id, "assigneeId": user["id"]})
+    if task:
+        return project
+    raise HTTPException(status_code=403, detail="Project access denied")
+
+
+@router.get("/", response_model=List[Project])
+async def get_all_projects(current_user: dict = Depends(get_current_user)):
+    return await load_accessible_projects(get_database(), current_user)
+
+
+@router.get("/{project_id}", response_model=Project)
+async def get_project(
+    project_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    return await require_project_access(get_database(), project_id, current_user)
+
 
 @router.post("/", response_model=Project, status_code=status.HTTP_201_CREATED)
-async def create_project(project_data: ProjectCreate, lead_id: str = None):
-    """Create a new project"""
+async def create_project(
+    project_data: ProjectCreate,
+    current_user: dict = Depends(get_current_user),
+):
+    if current_user.get("role") not in {"ADMIN", "TEAM_LEAD", "MANAGER"}:
+        raise HTTPException(status_code=403, detail="Project creation denied")
     db = get_database()
-    
-    # Create new project
+    lead_id = current_user["id"] if current_user["role"] != "ADMIN" else None
     project_id = f"PROJ-{int(datetime.utcnow().timestamp() * 1000)}"
     new_project = Project(
         id=project_id,
         name=project_data.name,
         description=project_data.description,
         orgId=project_data.orgId,
-        leadId=lead_id,  # Can be None initially
+        leadId=lead_id,
         memberIds=[],
-        status="ACTIVE"
+        status="ACTIVE",
     )
-    
     await db.projects.insert_one(new_project.model_dump())
     return new_project
 
+
 @router.put("/{project_id}", response_model=Project)
-async def update_project(project_id: str, project_update: ProjectUpdate):
-    """Update project information"""
+async def update_project(
+    project_id: str,
+    project_update: ProjectUpdate,
+    current_user: dict = Depends(get_current_user),
+):
     db = get_database()
-    
-    # Check if project exists
-    project = await db.projects.find_one({"id": project_id})
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
-    
-    # Update fields
-    update_data = {k: v for k, v in project_update.model_dump().items() if v is not None}
-    update_data["updatedAt"] = datetime.utcnow()
-    
-    await db.projects.update_one(
-        {"id": project_id},
-        {"$set": update_data}
-    )
-    
-    # Return updated project
-    updated_project = await db.projects.find_one({"id": project_id})
-    return updated_project
+    project = await require_project_access(db, project_id, current_user)
+    if not is_project_lead(project, current_user):
+        raise HTTPException(status_code=403, detail="Project update denied")
+
+    updates = project_update.model_dump(exclude_unset=True, exclude_none=True)
+    new_lead_id = updates.get("leadId")
+    if new_lead_id:
+        new_lead = await db.users.find_one({"id": new_lead_id})
+        if not new_lead or new_lead.get("role") not in {"TEAM_LEAD", "MANAGER"}:
+            raise HTTPException(status_code=400, detail="Lead must be a team lead or manager")
+    updates["updatedAt"] = datetime.utcnow()
+    await db.projects.update_one({"id": project_id}, {"$set": updates})
+    return await db.projects.find_one({"id": project_id})
+
 
 @router.post("/{project_id}/members/{user_id}", response_model=Project)
-async def add_member(project_id: str, user_id: str):
-    """Add a member to the project"""
+async def add_member(
+    project_id: str,
+    user_id: str,
+    current_user: dict = Depends(get_current_user),
+):
     db = get_database()
-    
-    # Check if project exists
-    project = await db.projects.find_one({"id": project_id})
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
-    
-    # Check if user exists
+    project = await require_project_access(db, project_id, current_user)
+    if not is_project_lead(project, current_user):
+        raise HTTPException(status_code=403, detail="Project membership management denied")
     user = await db.users.find_one({"id": user_id})
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-    
-    # Add member if not already in list
-    if user_id not in project.get("memberIds", []):
-        await db.projects.update_one(
-            {"id": project_id},
-            {
-                "$push": {"memberIds": user_id},
-                "$set": {"updatedAt": datetime.utcnow()}
-            }
-        )
-    
-    # Return updated project
-    updated_project = await db.projects.find_one({"id": project_id})
-    return updated_project
+    if not user or user.get("role") == "ADMIN":
+        raise HTTPException(status_code=404, detail="Assignable user not found")
+    await db.projects.update_one(
+        {"id": project_id},
+        {
+            "$addToSet": {"memberIds": user_id},
+            "$set": {"updatedAt": datetime.utcnow()},
+        },
+    )
+    return await db.projects.find_one({"id": project_id})
+
 
 @router.delete("/{project_id}/members/{user_id}", response_model=Project)
-async def remove_member(project_id: str, user_id: str):
-    """Remove a member from the project"""
+async def remove_member(
+    project_id: str,
+    user_id: str,
+    current_user: dict = Depends(get_current_user),
+):
     db = get_database()
-    
-    # Check if project exists
-    project = await db.projects.find_one({"id": project_id})
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
-    
-    # Remove member
+    project = await require_project_access(db, project_id, current_user)
+    if not is_project_lead(project, current_user):
+        raise HTTPException(status_code=403, detail="Project membership management denied")
     await db.projects.update_one(
         {"id": project_id},
         {
             "$pull": {"memberIds": user_id},
-            "$set": {"updatedAt": datetime.utcnow()}
-        }
+            "$set": {"updatedAt": datetime.utcnow()},
+        },
     )
-    
-    # Return updated project
-    updated_project = await db.projects.find_one({"id": project_id})
-    return updated_project
+    return await db.projects.find_one({"id": project_id})
+
 
 @router.delete("/{project_id}", response_model=MessageResponse)
-async def delete_project(project_id: str):
-    """Delete project"""
+async def delete_project(
+    project_id: str,
+    current_user: dict = Depends(get_current_user),
+):
     db = get_database()
-    
-    result = await db.projects.delete_one({"id": project_id})
-    if result.deleted_count == 0:
-        raise HTTPException(status_code=404, detail="Project not found")
-    
+    project = await require_project_access(db, project_id, current_user)
+    if not is_project_lead(project, current_user):
+        raise HTTPException(status_code=403, detail="Project deletion denied")
+    await db.projects.delete_one({"id": project_id})
     return MessageResponse(message="Project deleted successfully")

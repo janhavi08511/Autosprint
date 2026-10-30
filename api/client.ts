@@ -1,12 +1,26 @@
+import type { ActionType, DecisionLog, Task } from '../types';
+
 // API Client for MongoDB Backend
 const API_BASE_URL = 'http://localhost:8000';
 
+export interface AuthSession {
+    access_token: string;
+    token_type: 'bearer';
+    user: any;
+}
+
+export const getAuthHeaders = (): Record<string, string> => {
+    const token = localStorage.getItem('AEIP_ACCESS_TOKEN');
+    return token ? { Authorization: `Bearer ${token}` } : {};
+};
+
 // Generic API call function
-async function apiCall<T>(endpoint: string, options?: RequestInit): Promise<T> {
+export async function apiCall<T>(endpoint: string, options?: RequestInit): Promise<T> {
     const response = await fetch(`${API_BASE_URL}${endpoint}`, {
         ...options,
         headers: {
             'Content-Type': 'application/json',
+            ...getAuthHeaders(),
             ...options?.headers,
         },
     });
@@ -56,16 +70,20 @@ export interface UserLogin {
 export const userAPI = {
     getAll: () => apiCall<any[]>('/api/users/'),
 
-    getById: (id: string) => apiCall<any>(`/api/users/${id}`),
+    getMe: () => apiCall<any>('/api/users/me'),
+
+    getAssignable: (projectId?: string) => apiCall<any[]>(
+        `/api/users/assignable${projectId ? `?project_id=${encodeURIComponent(projectId)}` : ''}`
+    ),
 
     register: (userData: UserCreate) =>
-        apiCall<any>('/api/users/register', {
+        apiCall<AuthSession>('/api/users/register', {
             method: 'POST',
             body: JSON.stringify(userData),
         }),
 
     login: (credentials: UserLogin) =>
-        apiCall<any>('/api/users/login', {
+        apiCall<AuthSession>('/api/users/login', {
             method: 'POST',
             body: JSON.stringify(credentials),
         }),
@@ -92,16 +110,12 @@ export interface ProjectCreate {
 }
 
 export const projectAPI = {
-    getAll: (userId?: string) => {
-        const params = userId ? `?user_id=${userId}` : '';
-        return apiCall<any[]>(`/api/projects/${params}`);
-    },
+    getAll: () => apiCall<any[]>('/api/projects/'),
 
     getById: (id: string) => apiCall<any>(`/api/projects/${id}`),
 
-    create: (projectData: ProjectCreate, leadId?: string) => {
-        const params = leadId ? `?lead_id=${leadId}` : '';
-        return apiCall<any>(`/api/projects/${params}`, {
+    create: (projectData: ProjectCreate) => {
+        return apiCall<any>('/api/projects/', {
             method: 'POST',
             body: JSON.stringify(projectData),
         });
@@ -139,14 +153,61 @@ export interface TaskCreate {
     assigneeId?: string;
 }
 
+export interface TaskAgentStateUpdate {
+    riskScore: number;
+    lastAction: ActionType;
+}
+
+export interface DecisionTraceInput {
+    decisionId: string;
+    riskScore: number;
+    action: Exclude<ActionType, ActionType.NONE>;
+    retrievedMemories: { id: string; text: string; score?: number }[];
+    retrievalSource: 'FAISS' | 'LOCAL_FALLBACK' | 'NONE';
+    explanation: string;
+    explanationSource: 'GEMINI' | 'UNAVAILABLE';
+    escalationPath: string[];
+}
+
+export interface Notification {
+    id: string;
+    escalationId: string;
+    decisionId: string;
+    recipientUserId: string;
+    taskId: string;
+    taskTitle: string;
+    reason: string;
+    riskScore: number;
+    fromLevel: string;
+    toLevel: string;
+    action: string;
+    status: 'DELIVERED' | 'ACKNOWLEDGED' | 'RESOLVED';
+    createdAt: string;
+    acknowledgedAt?: string | null;
+    resolvedAt?: string | null;
+}
+
+const decisionLogFromTrace = (trace: any): DecisionLog => ({
+    id: trace.decisionId ?? trace.id,
+    taskId: trace.taskId,
+    timestamp: trace.timestamp ?? Date.parse(trace.createdAt),
+    action: trace.action ?? trace.reasoning?.action,
+    riskScore: trace.riskScore ?? trace.reasoning?.riskScore,
+    retrievedMemories: trace.retrievedMemories ?? trace.rag?.memories ?? [],
+    retrievalSource: trace.retrievalSource ?? trace.rag?.source ?? 'NONE',
+    explanation: trace.explanation ?? trace.llm?.explanation ?? '',
+    explanationSource: trace.explanationSource
+        ?? (trace.llm?.provider === 'Gemini' ? 'GEMINI' : 'UNAVAILABLE'),
+    escalationPath: trace.escalationPath ?? trace.reasoning?.escalationPath ?? [],
+    escalation: trace.escalation,
+    notification: trace.notification,
+    execution: trace.execution,
+});
+
 export const taskAPI = {
-    getAll: (userId?: string, projectId?: string) => {
-        const params = new URLSearchParams();
-        if (userId) params.append('user_id', userId);
-        if (projectId) params.append('project_id', projectId);
-        const queryString = params.toString();
-        return apiCall<any[]>(`/api/tasks/${queryString ? '?' + queryString : ''}`);
-    },
+    getAll: (projectId?: string) => apiCall<any[]>(
+        `/api/tasks/${projectId ? `?project_id=${encodeURIComponent(projectId)}` : ''}`
+    ),
 
     getById: (id: string) => apiCall<any>(`/api/tasks/${id}`),
 
@@ -160,6 +221,34 @@ export const taskAPI = {
         apiCall<any>(`/api/tasks/${id}`, {
             method: 'PUT',
             body: JSON.stringify(updates),
+        }),
+
+    updateAgentState: (id: string, state: TaskAgentStateUpdate) =>
+        apiCall<Task>(`/api/tasks/${id}/agent-state`, {
+            method: 'PUT',
+            body: JSON.stringify(state),
+        }),
+
+    recordDecision: async (id: string, decision: DecisionTraceInput) => {
+        const result = await apiCall<{ created: boolean; trace: any; task: Task }>(
+            `/api/tasks/${id}/decision-traces`,
+            { method: 'POST', body: JSON.stringify(decision) }
+        );
+        return {
+            ...result,
+            trace: result.trace ? decisionLogFromTrace(result.trace) : null,
+        };
+    },
+
+    getDecisionTraces: async (id: string) => {
+        const traces = await apiCall<any[]>(`/api/tasks/${id}/decision-traces`);
+        return traces.map(decisionLogFromTrace);
+    },
+
+    updateExecutionMemory: (decisionId: string, memoryId: string, stored: boolean) =>
+        apiCall<any>(`/api/decision-traces/${decisionId}/execution-memory`, {
+            method: 'PATCH',
+            body: JSON.stringify({ memoryId, stored }),
         }),
 
     updateStatus: (id: string, status: string) =>
@@ -177,6 +266,16 @@ export const taskAPI = {
         apiCall<any>(`/api/tasks/${id}`, {
             method: 'DELETE',
         }),
+};
+
+export const notificationAPI = {
+    getMine: () => apiCall<Notification[]>('/api/notifications/'),
+
+    acknowledge: (id: string) =>
+        apiCall<Notification>(`/api/notifications/${id}/acknowledge`, { method: 'POST' }),
+
+    resolve: (id: string) =>
+        apiCall<Notification>(`/api/notifications/${id}/resolve`, { method: 'POST' }),
 };
 
 // ===== Health Check =====

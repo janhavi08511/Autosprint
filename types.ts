@@ -33,7 +33,6 @@ export interface User {
   reliabilityScore: number; // 0-1 (displayed as 0-10 in UI)
   skills: string[]; // User's skillset
   email?: string; // Added for login
-  password?: string; // Added for login (mock)
 }
 
 export interface Department {
@@ -91,13 +90,42 @@ export interface MemoryRecord {
   vector?: number[]; // Simulated for the MVP
 }
 
+export type ExplanationSource = 'GEMINI' | 'UNAVAILABLE';
+export type MemoryRetrievalSource = 'FAISS' | 'LOCAL_FALLBACK' | 'NONE';
+
+export interface DecisionMemory {
+  id: string;
+  text: string;
+  score?: number;
+}
+
 export interface DecisionLog {
   id: string;
   taskId: string;
   timestamp: number;
   action: ActionType;
   riskScore: number;
-  retrievedMemories: string[];
+  retrievedMemories: DecisionMemory[];
+  retrievalSource: MemoryRetrievalSource;
   explanation: string;
+  explanationSource: ExplanationSource;
   escalationPath: string[];
+  escalation?: {
+    id: string;
+    fromLevel: string;
+    toLevel: string;
+    recipientUserId: string | null;
+    status: string;
+    deliveryStatus: string;
+  } | null;
+  notification?: {
+    id: string;
+    recipientUserId: string;
+    status: string;
+  } | null;
+  execution?: {
+    status: string;
+    memoryId: string | null;
+    memoryStored: boolean;
+  };
 }

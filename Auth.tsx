@@ -5,7 +5,7 @@ import { ALL_SKILLS } from './constants';
 import { userAPI } from './api/client';
 
 interface AuthProps {
-    onLogin: (user: User) => void;
+    onLogin: (user: User, token: string) => void;
 }
 
 export const Auth: React.FC<AuthProps> = ({ onLogin }) => {
@@ -41,21 +41,21 @@ export const Auth: React.FC<AuthProps> = ({ onLogin }) => {
         try {
             if (isLogin) {
                 // Login using MongoDB API
-                const user = await userAPI.login({
+                const session = await userAPI.login({
                     email: formData.email,
                     password: formData.password
                 });
-                onLogin(user);
+                onLogin(session.user, session.access_token);
             } else {
                 // Register using MongoDB API
-                const newUser = await userAPI.register({
+                const session = await userAPI.register({
                     name: formData.name,
                     email: formData.email,
                     password: formData.password,
-                    role: formData.role,
+                    role: UserRole.ASSIGNEE,
                     skills: selectedSkills.length > 0 ? selectedSkills : ['General']
                 });
-                onLogin(newUser);
+                onLogin(session.user, session.access_token);
             }
         } catch (err: any) {
             setError(err.message || 'An error occurred. Make sure MongoDB backend is running.');
@@ -154,8 +154,6 @@ export const Auth: React.FC<AuthProps> = ({ onLogin }) => {
                                             className="w-full px-4 py-3 bg-black/20 border border-white/10 rounded-xl focus:ring-2 focus:ring-indigo-500/50 outline-none text-white appearance-none cursor-pointer hover:bg-black/30 transition-all"
                                         >
                                             <option value={UserRole.ASSIGNEE} className="bg-slate-900">Employee</option>
-                                            <option value={UserRole.TEAM_LEAD} className="bg-slate-900">Team Lead</option>
-                                            <option value={UserRole.MANAGER} className="bg-slate-900">Manager</option>
                                         </select>
                                         <div className="absolute right-4 top-1/2 -translate-y-1/2 pointer-events-none text-slate-400">
                                             <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" /></svg>

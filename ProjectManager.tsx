@@ -1,47 +1,22 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import { User, UserRole, Project } from './types';
-import { USERS, MOCK_ORG_ID } from './mockData';
-import { userAPI, projectAPI } from './api/client';
+import { MOCK_ORG_ID } from './mockData';
+import { projectAPI } from './api/client';
 
 interface ProjectManagerProps {
     currentUser: User;
+    projects: Project[];
+    users: User[];
     onProjectsChange?: (projects: Project[]) => void;
 }
 
-export const ProjectManager: React.FC<ProjectManagerProps> = ({ currentUser, onProjectsChange }) => {
-    const [projects, setProjects] = useState<Project[]>([]);
-    const [users, setUsers] = useState<User[]>([]);
+export const ProjectManager: React.FC<ProjectManagerProps> = ({ currentUser, projects, users, onProjectsChange }) => {
     const [showCreateModal, setShowCreateModal] = useState(false);
     const [newProject, setNewProject] = useState({ name: '', description: '' });
-    const [loading, setLoading] = useState(true);
-
-    useEffect(() => {
-        const loadData = async () => {
-            try {
-                setLoading(true);
-                // Load users from MongoDB
-                const loadedUsers = await userAPI.getAll();
-                setUsers(loadedUsers);
-
-                // Load projects from MongoDB
-                const loadedProjects = await projectAPI.getAll(currentUser.id);
-                setProjects(loadedProjects);
-                console.log('📁 ProjectManager loaded:', loadedProjects.length, 'projects');
-            } catch (error) {
-                console.error('Failed to load data:', error);
-                // Fallback to mock data
-                setUsers(USERS);
-            } finally {
-                setLoading(false);
-            }
-        };
-        loadData();
-    }, []);
 
     const refreshProjects = async () => {
         try {
-            const loadedProjects = await projectAPI.getAll(currentUser.id);
-            setProjects(loadedProjects);
+            const loadedProjects = await projectAPI.getAll();
             if (onProjectsChange) {
                 onProjectsChange(loadedProjects);
             }
@@ -53,12 +28,11 @@ export const ProjectManager: React.FC<ProjectManagerProps> = ({ currentUser, onP
     const handleCreateProject = async (e: React.FormEvent) => {
         e.preventDefault();
         try {
-            const leadId = currentUser.role === UserRole.TEAM_LEAD ? currentUser.id : undefined;
             const newProj = await projectAPI.create({
                 name: newProject.name,
                 description: newProject.description,
                 orgId: MOCK_ORG_ID
-            }, leadId);
+            });
 
             console.log('✅ Project created:', newProj);
             await refreshProjects();
@@ -96,7 +70,9 @@ export const ProjectManager: React.FC<ProjectManagerProps> = ({ currentUser, onP
     // Filter projects based on role
     const visibleProjects = projects.filter(p => {
         if (currentUser.role === UserRole.ADMIN) return true;
-        if (currentUser.role === UserRole.TEAM_LEAD) return p.leadId === currentUser.id;
+        if (currentUser.role === UserRole.TEAM_LEAD || currentUser.role === UserRole.MANAGER) {
+            return p.leadId === currentUser.id || p.memberIds.includes(currentUser.id);
+        }
         return p.memberIds.includes(currentUser.id);
     });
 

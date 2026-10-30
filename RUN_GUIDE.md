@@ -47,38 +47,21 @@ npm install
 
 ---
 
-### Step 2: Configure Environment Variables
+### Step 2: Configure Backend Environment Variables
 
-Create a `.env.local` file in the **root directory** (same level as `package.json`):
+Copy `.env.example` to `rag_service/.env` and edit it with your MongoDB connection URI and a unique
+`AEIP_SECRET_KEY` (at least 32 random bytes). To bootstrap the first administrator, configure both
+`AEIP_ADMIN_EMAIL` and `AEIP_ADMIN_PASSWORD`. `GEMINI_API_KEY` is optional and must stay in this
+backend-only file; do not put secrets in a Vite `.env.local` file.
 
 **Windows (PowerShell):**
 ```powershell
-# Create the file
-New-Item -Path .env.local -ItemType File
-
-# Add your API key (replace with your actual key)
-Add-Content -Path .env.local -Value "VITE_GEMINI_API_KEY=your_actual_api_key_here"
+Copy-Item .env.example rag_service/.env
+notepad rag_service/.env
 ```
 
-**Windows (Command Prompt):**
-```cmd
-echo VITE_GEMINI_API_KEY=your_actual_api_key_here > .env.local
-```
-
-**Mac/Linux:**
-```bash
-# Create and edit the file
-nano .env.local
-# or
-echo "VITE_GEMINI_API_KEY=your_actual_api_key_here" > .env.local
-```
-
-**File content should be:**
-```env
-VITE_GEMINI_API_KEY=AIzaSyC3ThbiDA5K61syr-HAzcbjSAh6ps0riYI
-```
-
-> ⚠️ **Note**: Replace `your_actual_api_key_here` with your real Gemini API key from [Google AI Studio](https://makersuite.google.com/app/apikey)
+If a Gemini key is needed, obtain one through Google AI Studio and configure it only as
+`GEMINI_API_KEY` in `rag_service/.env`.
 
 ---
 
@@ -190,12 +173,10 @@ http://localhost:3000
 ## 🧪 Testing the Application
 
 ### 1. Login
-- Use any of these mock users:
-  - **Admin**: `admin@aeip.com` / `admin`
-  - **Team Lead**: `Sarah Chen` (no password needed for mock users)
-  - **Employee**: `Alex Johnson`
-
-Or create a new account using the "Register" option.
+- Register an assignee account using the "Request Access" option, or sign in with credentials
+  provisioned by an administrator.
+- Public registration cannot create privileged roles. Bootstrap the first admin using
+  `AEIP_ADMIN_EMAIL` and `AEIP_ADMIN_PASSWORD` in the backend environment.
 
 ### 2. Create a Task
 - If logged in as Admin or Team Lead, you'll see "Delegate New Workflow" form
@@ -247,7 +228,7 @@ lsof -i :8000
 ### Issue: "GEMINI_API_KEY not found"
 **Solution:**
 - Make sure `.env.local` file exists in the **root directory**
-- Check the file has: `VITE_GEMINI_API_KEY=your_key_here`
+- Check that `GEMINI_API_KEY` is configured in `rag_service/.env` if you want provider-generated explanations.
 - Restart the React dev server after creating `.env.local`
 
 ### Issue: Python packages won't install

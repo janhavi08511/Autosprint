@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { User } from './types';
 import { ALL_SKILLS, SKILL_CATEGORIES } from './constants';
+import { userAPI } from './api/client';
 
 interface SkillManagerProps {
     currentUser: User;
@@ -11,6 +12,8 @@ interface SkillManagerProps {
 export const SkillManager: React.FC<SkillManagerProps> = ({ currentUser, onUpdateSkills, onClose }) => {
     const [selectedSkills, setSelectedSkills] = useState<string[]>(currentUser.skills || []);
     const [activeCategory, setActiveCategory] = useState<string>('TECHNICAL');
+    const [saving, setSaving] = useState(false);
+    const [error, setError] = useState<string | null>(null);
 
     const handleSkillToggle = (skill: string) => {
         setSelectedSkills(prev =>
@@ -20,24 +23,20 @@ export const SkillManager: React.FC<SkillManagerProps> = ({ currentUser, onUpdat
         );
     };
 
-    const handleSave = () => {
-        const updatedUser = { ...currentUser, skills: selectedSkills };
-
-        // Update in localStorage
-        const storedUsersStr = localStorage.getItem('AEIP_USERS');
-        if (storedUsersStr) {
-            const storedUsers: User[] = JSON.parse(storedUsersStr);
-            const updatedUsers = storedUsers.map(u =>
-                u.id === currentUser.id ? updatedUser : u
-            );
-            localStorage.setItem('AEIP_USERS', JSON.stringify(updatedUsers));
+    const handleSave = async () => {
+        setSaving(true);
+        setError(null);
+        try {
+            const updatedUser = await userAPI.updateSkills(currentUser.id, selectedSkills);
+            localStorage.setItem('AEIP_CURRENT_USER', JSON.stringify(updatedUser));
+            onUpdateSkills(updatedUser);
+            onClose();
+        } catch (saveError) {
+            console.error('Failed to save skills:', saveError);
+            setError(saveError instanceof Error ? saveError.message : 'Unable to save skills.');
+        } finally {
+            setSaving(false);
         }
-
-        // Update current user session
-        localStorage.setItem('AEIP_CURRENT_USER', JSON.stringify(updatedUser));
-
-        onUpdateSkills(updatedUser);
-        onClose();
     };
 
     return (
@@ -63,6 +62,7 @@ export const SkillManager: React.FC<SkillManagerProps> = ({ currentUser, onUpdat
                     </div>
 
                     {/* Selected Skills Count */}
+                    {error && <p role="alert" className="mx-6 mt-4 text-sm text-red-600">{error}</p>}
                     <div className="mt-4 flex items-center gap-2">
                         <div className="px-3 py-1 bg-indigo-500 text-white rounded-full text-sm font-bold">
                             {selectedSkills.length} skill{selectedSkills.length !== 1 ? 's' : ''} selected
@@ -160,10 +160,11 @@ export const SkillManager: React.FC<SkillManagerProps> = ({ currentUser, onUpdat
                         Cancel
                     </button>
                     <button
-                        onClick={handleSave}
+                        onClick={() => void handleSave()}
+                        disabled={saving}
                         className="flex-1 px-6 py-3 bg-indigo-500 text-white rounded-lg font-bold hover:bg-indigo-600 transition shadow-lg shadow-indigo-500/25"
                     >
-                        Save Skills
+                        {saving ? 'Saving...' : 'Save Skills'}
                     </button>
                 </div>
             </div>

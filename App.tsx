@@ -3,9 +3,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import {
   Task, TaskStatus, User, DecisionLog, ActionType, UserRole, Project
 } from './types';
-import {
-  INITIAL_TASKS, USERS, DEPARTMENTS, TEAMS
-} from './mockData';
+import { DEPARTMENTS, TEAMS } from './mockData';
 import { runMonitoringCycle } from './agentService';
 import { Icons, ALL_SKILLS } from './constants';
 import { Auth } from './Auth';
@@ -14,7 +12,7 @@ import { initMemories } from './vectorStore';
 import { autoAssignTask, getSkillMatchPercentage } from './assignmentService';
 import { SkillManager } from './SkillManager';
 import { GanttChart } from './GanttChart';
-import { userAPI, taskAPI, projectAPI } from './api/client';
+import { userAPI, taskAPI, projectAPI, notificationAPI, Notification } from './api/client';
 
 const App: React.FC = () => {
   const [currentUser, setCurrentUser] = useState<User | null>(null);
@@ -27,61 +25,114 @@ const App: React.FC = () => {
   const [lastRun, setLastRun] = useState<number>(Date.now());
   const [showSkillManager, setShowSkillManager] = useState(false);
   const [projects, setProjects] = useState<Project[]>([]);
+  const [notifications, setNotifications] = useState<Notification[]>([]);
+  const [showNotifications, setShowNotifications] = useState(false);
+  const [notificationError, setNotificationError] = useState('');
   const [loading, setLoading] = useState(true);
 
-  const handleLogin = (user: User) => {
+  const handleLogin = (user: User, token: string) => {
+    localStorage.setItem('AEIP_ACCESS_TOKEN', token);
     setCurrentUser(user);
     localStorage.setItem('AEIP_CURRENT_USER', JSON.stringify(user));
   };
 
   const handleLogout = () => {
     setCurrentUser(null);
+    setUsers([]);
+    setTasks([]);
+    setProjects([]);
+    setNotifications([]);
+    setLogs([]);
+    localStorage.removeItem('AEIP_ACCESS_TOKEN');
     localStorage.removeItem('AEIP_CURRENT_USER');
   };
 
-  // Load data from MongoDB API
+  // Restore a session only after validating its token with the backend.
   useEffect(() => {
-    const loadData = async () => {
-      try {
-        setLoading(true);
-
-        // Restore session from localStorage
-        const savedUser = localStorage.getItem('AEIP_CURRENT_USER');
-        if (savedUser) {
-          setCurrentUser(JSON.parse(savedUser));
-        }
-
-        // Load users from MongoDB
-        const loadedUsers = await userAPI.getAll();
-        setUsers(loadedUsers);
-        console.log('👥 Loaded users from MongoDB:', loadedUsers.length, 'users');
-
-        // Load tasks from MongoDB
-        const loadedTasks = await taskAPI.getAll();
-        setTasks(loadedTasks);
-        console.log('📋 Loaded tasks from MongoDB:', loadedTasks.length, 'tasks');
-
-        // Load projects from MongoDB
-        const loadedProjects = await projectAPI.getAll();
-        setProjects(loadedProjects);
-        console.log('📁 Loaded projects from MongoDB:', loadedProjects.length, 'projects');
-
-      } catch (error) {
-        console.error('Failed to load data from MongoDB:', error);
-        console.log('⚠️ Using fallback mock data');
-        // Fallback to mock data if API fails
-        setUsers(USERS);
-        setTasks(INITIAL_TASKS);
-      } finally {
-        setLoading(false);
-      }
-    };
-
-    loadData();
-
-    // Initialize RAG Service with mock data
-    initMemories();
+    if (!localStorage.getItem('AEIP_ACCESS_TOKEN')) {
+      setLoading(false);
+      return;
+    }
+    userAPI.getMe()
+      .then(user => {
+        setCurrentUser(user);
+        localStorage.setItem('AEIP_CURRENT_USER', JSON.stringify(user));
+      })
+      .catch(error => {
+        console.error('Session validation failed:', error);
+        localStorage.removeItem('AEIP_ACCESS_TOKEN');
+        localStorage.removeItem('AEIP_CURRENT_USER');
+      })
+      .finally(() => setLoading(false));
   }, []);
+
+  useEffect(() => {
+    if (!currentUser) return;
+    let cancelled = false;
+    setLoading(true);
+    Promise.all([
+      userAPI.getAssignable(),
+      taskAPI.getAll(),
+      projectAPI.getAll(),
+      notificationAPI.getMine(),
+    ])
+      .then(([loadedUsers, loadedTasks, loadedProjects, loadedNotifications]) => {
+        if (cancelled) return;
+        setUsers(loadedUsers);
+        setTasks(loadedTasks);
+        setProjects(loadedProjects);
+        setNotifications(loadedNotifications);
+      })
+      .catch(error => {
+        if (!cancelled) {
+          console.error('Failed to load authenticated workspace data:', error);
+          setUsers([]);
+          setTasks([]);
+          setProjects([]);
+          setNotifications([]);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    initMemories();
+    return () => { cancelled = true; };
+  }, [currentUser?.id]);
+
+  useEffect(() => {
+    if (!currentUser || !selectedTaskId) return;
+    let cancelled = false;
+    taskAPI.getDecisionTraces(selectedTaskId)
+      .then(traces => {
+        if (cancelled) return;
+        setLogs(previous => [
+          ...previous.filter(log => log.taskId !== selectedTaskId),
+          ...traces,
+        ]);
+      })
+      .catch(error => {
+        if (!cancelled) console.error('Failed to load persisted decision trace:', error);
+      });
+    return () => { cancelled = true; };
+  }, [currentUser?.id, selectedTaskId]);
+
+  const handleNotificationTransition = async (
+    notification: Notification,
+    transition: 'acknowledge' | 'resolve'
+  ) => {
+    setNotificationError('');
+    try {
+      const updated = await notificationAPI[transition](notification.id);
+      setNotifications(previous => previous.map(item => item.id === updated.id ? updated : item));
+      const traces = await taskAPI.getDecisionTraces(notification.taskId);
+      setLogs(previous => [
+        ...previous.filter(log => log.taskId !== notification.taskId),
+        ...traces,
+      ]);
+    } catch (error) {
+      setNotificationError(error instanceof Error ? error.message : 'Notification update failed.');
+    }
+  };
 
   // Autonomous loop simulator
   const isMonitoringRef = React.useRef(false);
@@ -99,15 +150,20 @@ const App: React.FC = () => {
         isMonitoringRef.current = true;
         setIsMonitoring(true);
 
+        const monitoredTasks = currentUser.role === UserRole.ASSIGNEE
+          ? tasks.filter(task => task.assigneeId === currentUser.id)
+          : tasks;
         await runMonitoringCycle(
-          tasks,
+          monitoredTasks,
           users,
-          (log) => setLogs(prev => [log, ...prev]),
+          (log) => setLogs(prev => [log, ...prev.filter(existing => existing.id !== log.id)]),
           (updatedTasks) => {
-            setTasks(updatedTasks);
-            localStorage.setItem('AEIP_TASKS', JSON.stringify(updatedTasks));
+            const updatesById = new Map(updatedTasks.map(task => [task.id, task]));
+            setTasks(previous => previous.map(task => updatesById.get(task.id) ?? task));
           }
         );
+        const refreshedNotifications = await notificationAPI.getMine();
+        setNotifications(refreshedNotifications);
 
         setLastRun(Date.now());
       } catch (err) {
@@ -129,8 +185,14 @@ const App: React.FC = () => {
         return tasks;
       case UserRole.MANAGER:
       case UserRole.TEAM_LEAD:
-        // Show tasks for team or if lead is explicitly assigned
-        return tasks.filter(t => t.teamId === currentUser.teamId);
+        // The backend scopes the list; include cross-team work for owned/member projects.
+        const ledOrJoinedProjects = projects
+          .filter(p => p.leadId === currentUser.id || p.memberIds.includes(currentUser.id))
+          .map(p => p.id);
+        return tasks.filter(t =>
+          t.teamId === currentUser.teamId ||
+          (t.projectId && ledOrJoinedProjects.includes(t.projectId))
+        );
       case UserRole.ASSIGNEE:
         // Show tasks assigned to user OR belonging to projects user is a member of
         const userProjectIds = projects
@@ -144,7 +206,7 @@ const App: React.FC = () => {
       default:
         return [];
     }
-  }, [tasks, currentUser]);
+  }, [tasks, currentUser, projects]);
 
   const selectedTask = useMemo(() =>
     tasks.find(t => t.id === selectedTaskId),
@@ -152,11 +214,16 @@ const App: React.FC = () => {
   );
 
   const selectedLogs = useMemo(() =>
-    logs.filter(l => l.taskId === selectedTaskId),
+    logs.filter(l => l.taskId === selectedTaskId).sort((a, b) => b.timestamp - a.timestamp),
     [logs, selectedTaskId]
   );
 
+  const escalationPath = selectedLogs[0]?.escalationPath ?? [];
+
   if (!currentUser) {
+    if (loading) {
+      return <div className="min-h-screen bg-slate-900 text-white flex items-center justify-center">Validating session...</div>;
+    }
     return <Auth onLogin={handleLogin} />;
   }
 
@@ -246,6 +313,9 @@ const App: React.FC = () => {
 
   const handleUpdateSkills = (updatedUser: User) => {
     setCurrentUser(updatedUser);
+    setUsers(previous => previous.map(user =>
+      user.id === updatedUser.id ? updatedUser : user
+    ));
   };
 
   if (!currentUser) {
@@ -391,6 +461,8 @@ const App: React.FC = () => {
 
         <ProjectManager
           currentUser={currentUser}
+          projects={projects}
+          users={users}
           onProjectsChange={(updatedProjects) => setProjects(updatedProjects)}
         />
 
@@ -471,7 +543,7 @@ const App: React.FC = () => {
                   <div className="md:col-span-4 flex gap-2">
                     <select name="assigneeId" className="flex-1 px-4 py-2.5 bg-slate-900/50 border border-slate-700/50 rounded-xl focus:ring-2 focus:ring-indigo-500/50 outline-none text-sm font-medium text-white transition-all hover:bg-slate-900/70">
                       <option value="">🤖 Auto-Assign (Skill + Performance Match)</option>
-                      {USERS.filter(u =>
+                      {users.filter(u =>
                         (u.deptId === currentUser.deptId || currentUser.role === UserRole.ADMIN) &&
                         u.role !== UserRole.ADMIN
                       ).map(u => (
@@ -652,6 +724,61 @@ const App: React.FC = () => {
 
         {/* Right Column: AI Trace Panel */}
         <div className="space-y-6">
+          <section className="bg-white p-4 rounded-xl shadow border border-slate-200 text-slate-800">
+            <button
+              type="button"
+              onClick={() => setShowNotifications(open => !open)}
+              className="w-full flex items-center justify-between text-left"
+            >
+              <span className="text-xs font-bold uppercase tracking-widest text-indigo-700">
+                Notifications
+              </span>
+              <span className="text-[10px] font-bold text-slate-500">
+                {notifications.filter(item => item.status === 'DELIVERED').length} pending
+              </span>
+            </button>
+            {notificationError && (
+              <p role="alert" className="mt-3 text-[11px] text-red-600">{notificationError}</p>
+            )}
+            {showNotifications && (
+              <div className="mt-4 space-y-3">
+                {notifications.map(notification => (
+                  <article key={notification.id} className="rounded-lg border border-slate-200 p-3">
+                    <p className="text-[11px] font-bold text-slate-800">{notification.taskTitle}</p>
+                    <p className="mt-1 text-[10px] text-slate-600">
+                      {notification.fromLevel} → {notification.toLevel} · Risk {notification.riskScore}/100
+                    </p>
+                    <p className="mt-1 text-[10px] text-slate-500">{notification.reason}</p>
+                    <p className="mt-2 text-[9px] font-bold uppercase text-indigo-600">
+                      {notification.action.replace('_', ' ')} · {notification.status}
+                    </p>
+                    <div className="mt-2 flex gap-2">
+                      {notification.status === 'DELIVERED' && (
+                        <button
+                          onClick={() => void handleNotificationTransition(notification, 'acknowledge')}
+                          className="rounded bg-indigo-600 px-2 py-1 text-[10px] font-bold text-white"
+                        >
+                          Acknowledge
+                        </button>
+                      )}
+                      {notification.status === 'ACKNOWLEDGED' && (
+                        <button
+                          onClick={() => void handleNotificationTransition(notification, 'resolve')}
+                          className="rounded bg-emerald-600 px-2 py-1 text-[10px] font-bold text-white"
+                        >
+                          Resolve
+                        </button>
+                      )}
+                    </div>
+                  </article>
+                ))}
+                {notifications.length === 0 && (
+                  <p className="text-[11px] text-slate-400">No notifications for your account.</p>
+                )}
+              </div>
+            )}
+          </section>
+
           <div className="bg-white p-4 rounded-xl shadow border border-slate-200 sticky top-8 text-slate-800">
             <div className="flex items-center justify-between mb-4">
               <div className="flex items-center gap-2 text-indigo-600">
@@ -675,25 +802,61 @@ const App: React.FC = () => {
               </div>
             ) : (
               <div className="space-y-8 animate-in fade-in slide-in-from-right-4 duration-500">
+                {selectedLogs[0] ? <>
+                  <section className="rounded-lg bg-slate-50 p-3">
+                    <p className="text-[10px] font-bold uppercase text-slate-500">Persisted decision</p>
+                    <p className="mt-1 break-all font-mono text-[10px] text-slate-700">
+                      {selectedLogs[0].id}
+                    </p>
+                    <p className="mt-1 text-[10px] text-slate-500">
+                      {new Date(selectedLogs[0].timestamp).toLocaleString()}
+                    </p>
+                  </section>
                 <section>
-                  <label className="text-[10px] uppercase font-black text-slate-300 tracking-[0.2em] mb-3 block">RAG Memory Recall</label>
+                  <label className="text-[10px] uppercase font-black text-slate-300 tracking-[0.2em] mb-3 block">
+                    {selectedLogs[0]?.retrievalSource === 'LOCAL_FALLBACK'
+                      ? 'Local heuristic fallback (not RAG)'
+                      : selectedLogs[0]?.retrievalSource === 'FAISS'
+                        ? 'RAG Memory Recall (FAISS)'
+                        : 'RAG Memory Recall'}
+                  </label>
                   <div className="space-y-2">
-                    {selectedLogs[0]?.retrievedMemories.map((m, idx) => (
-                      <div key={idx} className="p-3 text-[11px] bg-indigo-50/40 text-indigo-700 border-l-4 border-indigo-400 rounded-r-xl font-medium leading-relaxed">
-                        <span className="opacity-40 mr-1 text-xs">#</span> {m}
+                    {selectedLogs[0]?.retrievedMemories.length ? selectedLogs[0].retrievedMemories.map((m, idx) => (
+                      <div key={m.id || idx} className="p-3 text-[11px] bg-indigo-50/40 text-indigo-700 border-l-4 border-indigo-400 rounded-r-xl font-medium leading-relaxed">
+                        <span className="opacity-40 mr-1 text-xs">#</span> {m.text}
+                        {typeof m.score === 'number' && (
+                          <span className="mt-1 block text-[9px] font-bold text-indigo-500">
+                            Similarity: {m.score.toFixed(3)}
+                          </span>
+                        )}
                       </div>
-                    )) || <div className="text-[11px] text-slate-400 italic">Contextualizing behavioral history...</div>}
+                    )) : <div className="text-[11px] text-slate-400 italic">
+                      {selectedLogs[0]?.retrievalSource === 'FAISS'
+                        ? 'FAISS returned no memory above the relevance threshold.'
+                        : selectedLogs[0]?.retrievalSource === 'LOCAL_FALLBACK'
+                          ? 'The local fallback returned no memory.'
+                          : 'No memory retrieval was recorded for this decision.'}
+                    </div>}
                   </div>
                 </section>
 
                 <section>
-                  <label className="text-[10px] uppercase font-black text-slate-300 tracking-[0.2em] mb-3 block">SLM reasoning logic</label>
-                  <div className="p-5 bg-slate-900 text-indigo-100 rounded-2xl text-[12px] leading-relaxed font-mono relative overflow-hidden group">
-                    <div className="absolute top-0 right-0 p-2 opacity-10 group-hover:opacity-30 transition">
-                      <Icons.Brain />
-                    </div>
-                    <span className="text-indigo-400 mr-2">$</span>
-                    {selectedLogs[0]?.explanation || "Initializing neural explanation layer..."}
+                  <label className="text-[10px] uppercase font-black text-slate-300 tracking-[0.2em] mb-3 block">Deterministic risk decision</label>
+                  <div className="p-5 bg-slate-900 text-indigo-100 rounded-2xl text-[12px] leading-relaxed font-mono">
+                    <p>Risk score: {selectedLogs[0].riskScore}/100</p>
+                    <p>Action: {selectedLogs[0].action}</p>
+                    <p className="mt-2 text-slate-400">Calculated from deadline, task status, priority, and assignee reliability.</p>
+                  </div>
+                </section>
+
+                <section>
+                  <label className="text-[10px] uppercase font-black text-slate-300 tracking-[0.2em] mb-3 block">
+                    {selectedLogs[0]?.explanationSource === 'GEMINI'
+                      ? 'Gemini explanation'
+                      : 'Local deterministic fallback'}
+                  </label>
+                  <div className="p-4 bg-indigo-50/40 text-indigo-700 rounded-xl text-[11px] leading-relaxed">
+                    {selectedLogs[0]?.explanation || 'No explanation was generated for the current decision.'}
                   </div>
                 </section>
 
@@ -701,7 +864,7 @@ const App: React.FC = () => {
                   <label className="text-[10px] uppercase font-black text-slate-300 tracking-[0.2em] mb-3 block">Escalation Path</label>
                   <div className="relative pl-8 pt-2">
                     <div className="absolute left-[15px] top-4 bottom-4 w-[2px] bg-indigo-100"></div>
-                    {(selectedLogs[0]?.escalationPath || [USERS.find(u => u.id === selectedTask?.assigneeId)?.name || 'Unassigned']).map((step, idx, arr) => (
+                    {escalationPath.length ? escalationPath.map((step, idx, arr) => (
                       <div key={idx} className="relative mb-6 last:mb-0 flex items-center gap-4 group">
                         <div className={`absolute -left-[23px] w-4 h-4 rounded-full border-4 border-white z-10 shadow-sm transition-all duration-300 ${idx === 0 ? 'bg-green-500' : idx < arr.length - 1 ? 'bg-indigo-500' : 'bg-slate-200'}`}></div>
                         <div>
@@ -713,9 +876,35 @@ const App: React.FC = () => {
                           </span>
                         </div>
                       </div>
-                    ))}
+                    )) : <p className="text-[11px] text-slate-400">No escalation is currently required.</p>}
                   </div>
+                  {selectedLogs[0]?.escalation && (
+                    <div className="mt-4 rounded-lg bg-slate-50 p-3 text-[10px] text-slate-600">
+                      <p>Escalation: {selectedLogs[0].escalation.fromLevel} → {selectedLogs[0].escalation.toLevel}</p>
+                      <p>Status: {selectedLogs[0].escalation.status}</p>
+                      <p>Delivery: {selectedLogs[0].escalation.deliveryStatus}</p>
+                      {selectedLogs[0].notification && (
+                        <p>Recipient: {selectedLogs[0].notification.recipientUserId}</p>
+                      )}
+                    </div>
+                  )}
                 </section>
+                {selectedLogs[0]?.execution && (
+                  <section>
+                    <label className="text-[10px] uppercase font-black text-slate-300 tracking-[0.2em] mb-3 block">
+                      Execution Memory
+                    </label>
+                    <div className="rounded-lg bg-slate-50 p-3 text-[10px] text-slate-600">
+                      <p>Status: {selectedLogs[0].execution.status}</p>
+                      {selectedLogs[0].execution.memoryId && <p>Memory ID: {selectedLogs[0].execution.memoryId}</p>}
+                    </div>
+                  </section>
+                )}
+                </> : (
+                  <p role="status" className="rounded-lg bg-slate-50 p-4 text-[11px] leading-relaxed text-slate-500">
+                    No persisted decision trace is available for this task yet. The panel will show recorded retrieval, reasoning, escalation, and explanation data after the agent makes a decision.
+                  </p>
+                )}
               </div>
             )}
           </div>
@@ -723,7 +912,7 @@ const App: React.FC = () => {
           <div className="bg-amber-50/50 border border-amber-100 rounded-2xl p-5 text-[11px] text-amber-700 flex gap-4">
             <div className="shrink-0 text-lg">🛡️</div>
             <p className="leading-normal">
-              <strong>Data Privacy Protocol:</strong> Reasoning is performed on tokenized behavioral abstractions. No direct user content is exposed to third-party LLM providers.
+              <strong>Data Privacy:</strong> Risk scoring is deterministic. When enabled, Gemini receives the task title, status, priority, role, risk score, and retrieved memories to generate an explanation.
             </p>
           </div>
         </div>

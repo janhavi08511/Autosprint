@@ -1,5 +1,5 @@
-from pydantic import BaseModel, Field
-from typing import List, Optional
+from pydantic import BaseModel, Field, field_validator
+from typing import List, Literal, Optional
 from datetime import datetime
 
 # ===== User Models =====
@@ -17,8 +17,8 @@ class UserBase(BaseModel):
 class UserCreate(BaseModel):
     name: str
     email: str
-    password: str
-    role: str
+    password: str = Field(min_length=12, max_length=256)
+    role: str = "ASSIGNEE"
     skills: List[str] = []
 
 class UserLogin(BaseModel):
@@ -32,25 +32,20 @@ class UserUpdate(BaseModel):
     teamId: Optional[str] = None
     deptId: Optional[str] = None
 
-class User(UserBase):
-    password: str
+class UserPublic(UserBase):
     createdAt: datetime = Field(default_factory=datetime.utcnow)
     updatedAt: datetime = Field(default_factory=datetime.utcnow)
 
-    class Config:
-        json_schema_extra = {
-            "example": {
-                "id": "USER-001",
-                "name": "Alex Johnson",
-                "email": "alex@example.com",
-                "password": "password123",
-                "role": "ASSIGNEE",
-                "teamId": "TEAM-001",
-                "deptId": "DEPT-001",
-                "reliabilityScore": 0.85,
-                "skills": ["JavaScript", "React", "Node.js"]
-            }
-        }
+    @field_validator("role", mode="before")
+    @classmethod
+    def normalize_legacy_role(cls, value: str) -> str:
+        return "TEAM_LEAD" if value == "LEAD" else value
+
+
+class AuthResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    user: UserPublic
 
 # ===== Project Models =====
 
@@ -131,6 +126,34 @@ class TaskUpdate(BaseModel):
     assigneeId: Optional[str] = None
     riskScore: Optional[int] = None
     lastAction: Optional[str] = None
+
+class TaskAgentStateUpdate(BaseModel):
+    riskScore: int = Field(ge=0, le=100)
+    lastAction: Literal[
+        "NONE", "REMIND", "RISK_ALERT", "ESCALATE", "CRITICAL_ESCALATE"
+    ]
+
+class TraceMemory(BaseModel):
+    id: str
+    text: str
+    score: Optional[float] = None
+
+
+class DecisionTraceCreate(BaseModel):
+    decisionId: str = Field(min_length=1, max_length=100)
+    riskScore: int = Field(ge=0, le=100)
+    action: Literal["REMIND", "RISK_ALERT", "ESCALATE", "CRITICAL_ESCALATE"]
+    retrievedMemories: List[TraceMemory] = Field(default_factory=list)
+    retrievalSource: Literal["FAISS", "LOCAL_FALLBACK", "NONE"]
+    explanation: str
+    explanationSource: Literal["GEMINI", "UNAVAILABLE"]
+    escalationPath: List[str] = Field(default_factory=list)
+
+
+class ExecutionMemoryUpdate(BaseModel):
+    memoryId: Optional[str] = None
+    stored: bool
+
 
 class Task(TaskBase):
     deadline: int

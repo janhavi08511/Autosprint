@@ -20,7 +20,7 @@ export const USERS: User[] = [
   { id: 'USER-03', name: 'Mike Ross', role: UserRole.TEAM_LEAD, teamId: 'TEAM-02', deptId: 'DEPT-01', reliabilityScore: 0.90, skills: ['DevOps', 'AWS', 'Docker', 'Kubernetes', 'CI/CD'] },
   { id: 'USER-04', name: 'Jordan Smith', role: UserRole.MANAGER, teamId: 'TEAM-01', deptId: 'DEPT-01', reliabilityScore: 0.98, skills: ['Stakeholder Management', 'Budget Planning', 'Agile', 'Project Management'] },
   { id: 'USER-05', name: 'Lisa Ray', role: UserRole.TEAM_LEAD, teamId: 'TEAM-03', deptId: 'DEPT-02', reliabilityScore: 0.80, skills: ['Communication', 'User Research', 'Project Management'] },
-  { id: 'USER-06', name: 'System Admin', role: UserRole.ADMIN, teamId: 'SYSTEM', deptId: 'SYSTEM', reliabilityScore: 1.0, email: 'admin@aeip.com', password: 'admin', skills: ['System Administration', 'Security', 'Monitoring'] },
+  { id: 'USER-06', name: 'System Admin', role: UserRole.ADMIN, teamId: 'SYSTEM', deptId: 'SYSTEM', reliabilityScore: 1.0, skills: ['System Administration', 'Security', 'Monitoring'] },
 ];
 
 const NOW = Date.now();
